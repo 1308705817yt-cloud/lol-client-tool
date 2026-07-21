@@ -247,8 +247,6 @@ async def connect(connection):
                     loaded_champs.append(c_obj)
 
             loaded_champs.sort(key=lambda x: x.display_name)
-            # LCU 断线重连会再次触发 ready。整体替换缓存，避免英雄对象
-            # 在长时间运行中重复追加。
             shared.ALL_CHAMPS[:] = loaded_champs
             shared.CHAMPION_DICT.clear()
             shared.CHAMPION_DICT.update({c.id: c.name for c in loaded_champs})
@@ -262,7 +260,6 @@ async def connect(connection):
     except Exception as exc:
         shared.gui_print(f"英雄数据加载失败: {exc}", "loss")
 
-    # 程序可能在对局已经开始后才启动，此时收不到 phase 的 UPDATE 事件。
     try:
         phase_response = await connection.request("get", "/lol-gameflow/v1/gameflow-phase")
         if phase_response.status == 200:
@@ -560,12 +557,25 @@ async def manual_requery_task():
 )
 async def champ_select_changed(connection, event):
     global lobby_processed, is_processing
-    update_targets_from_champ_select(event.data)
+    session_data = event.data
+    update_targets_from_champ_select(session_data)
+    
+    # 将获取到的英雄池，赋值给全局变量给 GUI 轮询使用
+    bench_champs = session_data.get("benchChampions", [])
+    bench_ids = []
+    for champ in bench_champs:
+        if isinstance(champ, dict):
+            bench_ids.append(champ.get("championId"))
+        elif isinstance(champ, int):
+            bench_ids.append(champ)
+            
+    shared.CURRENT_BENCH = bench_ids
+        
     if lobby_processed or is_processing:
         return
     is_processing = True
     try:
-        if await fetch_and_print_stats(connection, event.data):
+        if await fetch_and_print_stats(connection, session_data):
             lobby_processed = True
     finally:
         is_processing = False
@@ -576,7 +586,27 @@ async def champ_select_ended(connection, event):
     lobby_processed = False
     is_processing = False
     executed_actions.clear()
+    
+    # 离开选人界面时，清空工具上的英雄席
+    shared.CURRENT_BENCH = []
+        
     shared.gui_print("\n[-] 已离开选人界面，准备好迎接下一局...\n", "sys")
+
+async def execute_bench_swap(champ_id):
+    """直接调用接口绕过前端冷却"""
+    if not GLOBAL_CONN:
+        return
+    try:
+        res = await GLOBAL_CONN.request(
+            "post", 
+            f"/lol-champ-select/v1/session/bench/swap/{champ_id}"
+        )
+        if res.status in [200, 204]:
+            champ_name = shared.CHAMPION_DICT.get(champ_id, str(champ_id))
+            shared.gui_print(f"已成功抢到英雄: {champ_name}", "success")
+    except Exception as exc:
+        shared.gui_print(f"抢夺英雄请求失败: {exc}", "loss")
+
 
 @connector.ws.register("/lol-gameflow/v1/gameflow-phase", event_types=("UPDATE",))
 async def gameflow_changed(connection, event):

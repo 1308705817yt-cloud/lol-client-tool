@@ -31,10 +31,27 @@ class Application:
 
         self._build_layout()
         self._register_ui_hooks()
+        
+        # --- 定时轮询英雄席数据 ---
+        shared.CURRENT_BENCH = []
+        self._last_bench = None
+        self.root.after(500, self._poll_bench)
+        # ------------------------
+        
         self.root.after(20, self._drain_ui_tasks)
         shared.gui_print("程序已启动，可在上方选项卡中配置功能。", "sys")
 
-    # ---------- 主框架与跨线程调度 ----------
+    def _poll_bench(self):
+        """每 0.5 秒检查一次后台读取到的英雄席数据并刷新 UI"""
+        if self.closed:
+            return
+        
+        current = getattr(shared, "CURRENT_BENCH", [])
+        if current != self._last_bench:
+            self._last_bench = list(current)
+            self._update_bench_ui(current)
+            
+        self.root.after(500, self._poll_bench)
 
     def _build_layout(self):
         notebook = ttk.Notebook(self.root)
@@ -93,12 +110,11 @@ class Application:
         self.closed = True
         self.root.destroy()
 
-    # ---------- 战绩与 BP ----------
-
     def _build_game_tab(self, parent):
         self._build_query_panel(parent)
         self._build_blacklist_panel(parent)
         self._build_automation_panel(parent)
+        self._build_aram_bench_panel(parent) 
         self._build_match_table(parent)
 
     def _build_query_panel(self, parent):
@@ -232,9 +248,9 @@ class Application:
         frame = ttk.LabelFrame(parent, text="自动化设定 (支持拼音搜索)")
         frame.pack(padx=10, pady=5, fill=tk.X)
 
-        self.auto_accept = tk.BooleanVar(value=shared.CURRENT_CONFIG["自动接受"])
-        self.auto_ban = tk.BooleanVar(value=shared.CURRENT_CONFIG["自动禁用"])
-        self.auto_pick = tk.BooleanVar(value=shared.CURRENT_CONFIG["自动选择"])
+        self.auto_accept = tk.BooleanVar(value=shared.CURRENT_CONFIG.get("自动接受", False))
+        self.auto_ban = tk.BooleanVar(value=shared.CURRENT_CONFIG.get("自动禁用", False))
+        self.auto_pick = tk.BooleanVar(value=shared.CURRENT_CONFIG.get("自动选择", False))
 
         ttk.Checkbutton(
             frame, text="秒接对局", variable=self.auto_accept, command=self._save_automation
@@ -245,14 +261,14 @@ class Application:
 
         champion_values = [champ.display_name for champ in shared.ALL_CHAMPS]
         self.ban_combo = ttk.Combobox(frame, values=champion_values, width=18)
-        self.ban_combo.set(shared.CURRENT_CONFIG["禁用英雄"])
+        self.ban_combo.set(shared.CURRENT_CONFIG.get("禁用英雄", ""))
         self.ban_combo.grid(row=0, column=2, padx=5, pady=5)
 
         ttk.Checkbutton(
             frame, text="自动秒选:", variable=self.auto_pick, command=self._save_automation
         ).grid(row=0, column=3, padx=(10, 0), pady=5)
         self.pick_combo = ttk.Combobox(frame, values=champion_values, width=18)
-        self.pick_combo.set(shared.CURRENT_CONFIG["选择英雄"])
+        self.pick_combo.set(shared.CURRENT_CONFIG.get("选择英雄", ""))
         self.pick_combo.grid(row=0, column=4, padx=5, pady=5)
 
         for combo in (self.ban_combo, self.pick_combo):
@@ -294,12 +310,58 @@ class Application:
             combo.icursor(tk.END)
         self._save_automation()
 
+    def _build_aram_bench_panel(self, parent):
+        self.bench_frame = ttk.LabelFrame(parent, text="大乱斗实时英雄席 (点击秒抢，无视冷却)")
+        self.bench_frame.pack(padx=10, pady=5, fill=tk.X)
+        self._set_bench_placeholder()
+
+    def _set_bench_placeholder(self):
+        for widget in self.bench_frame.winfo_children():
+            widget.destroy()
+        ttk.Label(
+            self.bench_frame, 
+            text="匹配进入大乱斗选人界面后，这里会自动显示池子里的英雄供您一键抢夺..."
+        ).pack(padx=5, pady=8)
+
+    def _update_bench_ui(self, bench_champions):
+        # 清空原有的按钮或文本
+        for widget in self.bench_frame.winfo_children():
+            widget.destroy()
+            
+        if not bench_champions:
+            self._set_bench_placeholder()
+            return
+            
+        # 动态生成当前可供抢夺的英雄按钮
+        for index, champ_id in enumerate(bench_champions):
+            champ_name = shared.CHAMPION_DICT.get(champ_id, f"英雄{champ_id}")
+            btn = tk.Button(
+                self.bench_frame,
+                text=champ_name,
+                width=10,
+                height=2,
+                cursor="hand2",
+                bg="#e8f4f8",
+                activebackground="#a8e6cf",
+                command=lambda cid=champ_id: self._grab_bench_champion(cid)
+            )
+            btn.grid(row=index // 6, column=index % 6, padx=8, pady=8)
+            
+    def _grab_bench_champion(self, champ_id):
+        if lcu_core.GLOBAL_CONN and lcu_core.GLOBAL_LOOP:
+            asyncio.run_coroutine_threadsafe(
+                lcu_core.execute_bench_swap(champ_id),
+                lcu_core.GLOBAL_LOOP
+            )
+        else:
+            shared.gui_print("与客户端断开连接，无法执行请求。", "loss")
+
     def _build_match_table(self, parent):
         frame = ttk.LabelFrame(parent, text="实时对局信息（进入游戏后自动刷新）")
         frame.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
 
         columns = ("队伍", "玩家ID", "英雄", "段位", "KDA", "胜率")
-        self.match_tree = ttk.Treeview(frame, columns=columns, show="headings", height=13)
+        self.match_tree = ttk.Treeview(frame, columns=columns, show="headings", height=10)
         definitions = (
             ("队伍", "阵营", 60), ("玩家ID", "玩家ID", 140),
             ("英雄", "英雄", 90), ("段位", "段位 (单双/灵活)", 160),
@@ -314,8 +376,6 @@ class Application:
         self.match_tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.match_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-    # ---------- 预设快捷发送 ----------
 
     def _build_chat_tab(self, parent):
         self.chat_canvas = tk.Canvas(parent, borderwidth=0, highlightthickness=0)
@@ -452,8 +512,6 @@ class Application:
             shared.CURRENT_CONFIG[f"目标_{key}"] = entry.get().strip()
         shared.save_config()
 
-    # ---------- 日志与后台回调 ----------
-
     def _build_log_tab(self, parent):
         self.log = scrolledtext.ScrolledText(
             parent,
@@ -541,8 +599,10 @@ class Application:
         self.ban_combo.configure(values=values)
         self.pick_combo.configure(values=values)
 
+    # --- 核心修复：更新黑名单组合框时，修复参数传递导致的崩溃 ---
     def update_blacklist_choices(self, players):
-        self.dispatch(self.blacklist_combo.configure, values=list(players))
+        self.dispatch(lambda: self.blacklist_combo.configure(values=list(players)))
+    # ------------------------------------------------------------
 
     def update_send_channel(self, send_to_all):
         self.dispatch(self.split_all.set, send_to_all)
