@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.config.*.tmp
+config.json
+.venv/
+.idea/
+.vscode/
+.agents/
+.codex/
+.coverage
+htmlcov/
+*.log
+*.spec
+Thumbs.db
+.DS_Store
+build/
+dist/
